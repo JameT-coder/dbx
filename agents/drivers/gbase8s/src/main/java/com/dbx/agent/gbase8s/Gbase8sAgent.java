@@ -420,37 +420,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<String> listSchemas() {
-        try {
-            String catalog = currentCatalog();
-            List<String> cached = cachedSchemas(catalog);
-            if (cached != null) {
-                return cached;
-            }
-            Connection connection = requireConnection();
-            if (!connection.getMetaData().supportsSchemasInDataManipulation()) {
-                List<String> schemas = Collections.emptyList();
-                cacheSchemas(catalog, schemas);
-                return schemas;
-            }
-            Set<String> schemas = new LinkedHashSet<>();
-            try (PreparedStatement stmt = connection.prepareStatement(
-                "SELECT owner FROM systables WHERE tabid >= 100 AND tabtype IN ('T', 'V') AND owner IS NOT NULL "
-                    + "UNION SELECT owner FROM sysprocedures WHERE owner IS NOT NULL ORDER BY owner"
-            ); ResultSet rs = stmt.executeQuery()) {
-                while (rs.next()) {
-                    String owner = trim(rs.getString("owner"));
-                    if (!owner.isEmpty()) {
-                        schemas.add(owner);
-                    }
-                }
-            }
-            List<String> result = new ArrayList<>(schemas);
-            Collections.sort(result);
-            cacheSchemas(catalog, result);
-            return result;
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        return Collections.emptyList();
     }
 
     @Override
@@ -542,10 +512,13 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             || constraints.objectTypeAllowed("FUNCTION");
     }
 
+    private static final String USER_ROUTINE_CONDITION =
+        "isproc = ? AND mode IN ('O', 'D', 'R') AND EXISTS (SELECT 1 FROM sysprocbody b WHERE b.procid = sysprocedures.procid AND b.datakey = 'T')";
+
     private void appendRoutineObjects(List<ObjectInfo> result, String schema, String routineKind, String objectType)
         throws Exception {
         List<Object> args = new ArrayList<>();
-        StringBuilder sql = new StringBuilder("SELECT procname FROM sysprocedures WHERE isproc = ?");
+        StringBuilder sql = new StringBuilder("SELECT procname FROM sysprocedures WHERE ").append(USER_ROUTINE_CONDITION);
         args.add(routineKind);
         String owner = trim(schema);
         if (!owner.isEmpty()) {
@@ -582,7 +555,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             branches.add(tableSql.toString());
         }
         if (constraints.objectTypeAllowed("FUNCTION")) {
-            StringBuilder functionSql = new StringBuilder("SELECT procname AS object_name, 'FUNCTION' AS object_type, 1 AS object_order FROM sysprocedures WHERE isproc = 'f'");
+            StringBuilder functionSql = new StringBuilder("SELECT procname AS object_name, 'FUNCTION' AS object_type, 1 AS object_order FROM sysprocedures WHERE isproc = 'f' AND mode IN ('O', 'D', 'R') AND EXISTS (SELECT 1 FROM sysprocbody b WHERE b.procid = sysprocedures.procid AND b.datakey = 'T')");
             if (!owner.isEmpty()) {
                 functionSql.append(" AND owner = ?");
                 args.add(owner);
@@ -594,7 +567,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             branches.add(functionSql.toString());
         }
         if (constraints.objectTypeAllowed("PROCEDURE")) {
-            StringBuilder procedureSql = new StringBuilder("SELECT procname AS object_name, 'PROCEDURE' AS object_type, 2 AS object_order FROM sysprocedures WHERE isproc = 't'");
+            StringBuilder procedureSql = new StringBuilder("SELECT procname AS object_name, 'PROCEDURE' AS object_type, 2 AS object_order FROM sysprocedures WHERE isproc = 't' AND mode IN ('O', 'D', 'R') AND EXISTS (SELECT 1 FROM sysprocbody b WHERE b.procid = sysprocedures.procid AND b.datakey = 'T')");
             if (!owner.isEmpty()) {
                 procedureSql.append(" AND owner = ?");
                 args.add(owner);

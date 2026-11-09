@@ -272,29 +272,9 @@ class Gbase8sAgentTest {
     }
 
     @Test
-    void omitsOwnerSchemasWhenTheDatabaseCannotUseThemInDml() {
-        List<String> sql = new ArrayList<>();
+    void omitsOwnerSchemas() {
         Gbase8sAgent agent = new Gbase8sAgent();
-        TestSupport.setPrivateConnection(
-            agent,
-            schemaConnection(false, sql, resultSet(new String[]{"owner"}, new Object[][]{{"gbasedbt"}}))
-        );
-
         Assertions.assertTrue(agent.listSchemas().isEmpty());
-        Assertions.assertTrue(sql.isEmpty());
-    }
-
-    @Test
-    void listsOwnerSchemasWhenTheDatabaseSupportsThemInDml() {
-        List<String> sql = new ArrayList<>();
-        Gbase8sAgent agent = new Gbase8sAgent();
-        TestSupport.setPrivateConnection(
-            agent,
-            schemaConnection(true, sql, resultSet(new String[]{"owner"}, new Object[][]{{"gbasedbt"}}))
-        );
-
-        Assertions.assertEquals(List.of("gbasedbt"), agent.listSchemas());
-        Assertions.assertEquals(1, sql.size());
     }
 
     @Test
@@ -377,8 +357,8 @@ class Gbase8sAgentTest {
         Assertions.assertEquals("archive_records", objects.get(3).getName());
         Assertions.assertEquals("PROCEDURE", objects.get(3).getObject_type());
         Assertions.assertTrue(sql.get(0).contains("FROM systables"));
-        Assertions.assertTrue(sql.get(1).contains("FROM sysprocedures WHERE isproc = ?"));
-        Assertions.assertTrue(sql.get(2).contains("FROM sysprocedures WHERE isproc = ?"));
+        Assertions.assertTrue(sql.get(1).contains("FROM sysprocedures WHERE isproc = ? AND mode IN ('O', 'D', 'R')"));
+        Assertions.assertTrue(sql.get(2).contains("FROM sysprocedures WHERE isproc = ? AND mode IN ('O', 'D', 'R')"));
     }
 
     @Test
@@ -403,8 +383,8 @@ class Gbase8sAgentTest {
         Assertions.assertEquals("FUNCTION", objects.get(0).getObject_type());
         Assertions.assertEquals("process_order", objects.get(1).getName());
         Assertions.assertEquals("PROCEDURE", objects.get(1).getObject_type());
-        Assertions.assertTrue(sql.get(0).contains("FROM sysprocedures WHERE isproc = 'f'"));
-        Assertions.assertTrue(sql.get(0).contains("FROM sysprocedures WHERE isproc = 't'"));
+        Assertions.assertTrue(sql.get(0).contains("FROM sysprocedures WHERE isproc = 'f' AND mode IN ('O', 'D', 'R')"));
+        Assertions.assertTrue(sql.get(0).contains("FROM sysprocedures WHERE isproc = 't' AND mode IN ('O', 'D', 'R')"));
     }
 
     @Test
