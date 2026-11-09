@@ -342,22 +342,69 @@ class Gbase8sAgentTest {
     void listObjectsLoadsGbase8sTablesAndViews() {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();
-        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"tabname", "tabtype", "comments"},
-            new Object[][]{
-                {"users", "T", "User table"},
-                {"v_active_users", "V", "Active users view"}
-            }
-        )));
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            sql,
+            resultSet(
+                new String[]{"tabname", "tabtype", "comments"},
+                new Object[][]{
+                    {"users", "T", "User table"},
+                    {"v_active_users", "V", "Active users view"}
+                }
+            ),
+            resultSet(
+                new String[]{"procname"},
+                new Object[][]{
+                    {"calc_total"}
+                }
+            ),
+            resultSet(
+                new String[]{"procname"},
+                new Object[][]{
+                    {"archive_records"}
+                }
+            )
+        ));
 
         List<ObjectInfo> objects = agent.listObjects("root");
 
-        Assertions.assertEquals(2, objects.size());
+        Assertions.assertEquals(4, objects.size());
         Assertions.assertEquals("users", objects.get(0).getName());
         Assertions.assertEquals("TABLE", objects.get(0).getObject_type());
         Assertions.assertEquals("v_active_users", objects.get(1).getName());
         Assertions.assertEquals("VIEW", objects.get(1).getObject_type());
+        Assertions.assertEquals("calc_total", objects.get(2).getName());
+        Assertions.assertEquals("FUNCTION", objects.get(2).getObject_type());
+        Assertions.assertEquals("archive_records", objects.get(3).getName());
+        Assertions.assertEquals("PROCEDURE", objects.get(3).getObject_type());
         Assertions.assertTrue(sql.get(0).contains("FROM systables"));
+        Assertions.assertTrue(sql.get(1).contains("FROM sysprocedures WHERE isproc = ?"));
+        Assertions.assertTrue(sql.get(2).contains("FROM sysprocedures WHERE isproc = ?"));
+    }
+
+    @Test
+    void constrainedListObjectsFiltersGbase8sRoutines() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"object_name", "object_type"},
+            new Object[][]{
+                {"calc_tax", "FUNCTION"},
+                {"process_order", "PROCEDURE"}
+            }
+        )));
+
+        List<ObjectInfo> objects = agent.listObjects(
+            "gbasedbt",
+            new MetadataListConstraints(null, null, null, List.of("FUNCTION", "PROCEDURE"))
+        );
+
+        Assertions.assertEquals(2, objects.size());
+        Assertions.assertEquals("calc_tax", objects.get(0).getName());
+        Assertions.assertEquals("FUNCTION", objects.get(0).getObject_type());
+        Assertions.assertEquals("process_order", objects.get(1).getName());
+        Assertions.assertEquals("PROCEDURE", objects.get(1).getObject_type());
+        Assertions.assertTrue(sql.get(0).contains("FROM sysprocedures WHERE isproc = 'f'"));
+        Assertions.assertTrue(sql.get(0).contains("FROM sysprocedures WHERE isproc = 't'"));
     }
 
     @Test
@@ -365,9 +412,9 @@ class Gbase8sAgentTest {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"tabname", "tabtype", "comments"},
+            new String[]{"object_name", "object_type"},
             new Object[][]{
-                {"v_orders", "V", null}
+                {"v_orders", "VIEW"}
             }
         )));
 
@@ -1031,6 +1078,36 @@ class Gbase8sAgentTest {
         Assertions.assertTrue(sql.get(0).contains("t.owner = ?"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("ORDER BY v.seqno"), sql.get(0));
         Assertions.assertTrue(sql.get(1).contains("system_boundary_tabid"), sql.get(1));
+    }
+
+    @Test
+    void getObjectSourceUsesGbase8sRoutineCatalog() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            sql,
+            resultSet(
+                new String[]{"data"},
+                new Object[][]{
+                    {"create procedure \"gbasedbt\".my_proc() "},
+                    {"returning int; return 1; end procedure;\0   "}
+                }
+            )
+        ));
+
+        ObjectSource source = agent.getObjectSource("gbasedbt", "my_proc", "PROCEDURE");
+
+        Assertions.assertEquals("my_proc", source.getName());
+        Assertions.assertEquals("PROCEDURE", source.getObject_type());
+        Assertions.assertEquals("gbasedbt", source.getSchema());
+        Assertions.assertEquals("create procedure \"gbasedbt\".my_proc() returning int; return 1; end procedure;", source.getSource());
+        Assertions.assertFalse(source.isEditable());
+        Assertions.assertEquals(1, sql.size());
+        Assertions.assertTrue(sql.get(0).contains("FROM sysprocbody b"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("p.procname = ?"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("b.datakey = 'T'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("p.owner = ?"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("ORDER BY b.seqno"), sql.get(0));
     }
 
     @Test

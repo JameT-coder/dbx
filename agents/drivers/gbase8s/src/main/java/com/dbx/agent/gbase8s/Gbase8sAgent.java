@@ -434,7 +434,8 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             }
             Set<String> schemas = new LinkedHashSet<>();
             try (PreparedStatement stmt = connection.prepareStatement(
-                "SELECT DISTINCT owner FROM systables WHERE tabid >= 100 AND tabtype IN ('T', 'V') ORDER BY owner"
+                "SELECT owner FROM systables WHERE tabid >= 100 AND tabtype IN ('T', 'V') AND owner IS NOT NULL "
+                    + "UNION SELECT owner FROM sysprocedures WHERE owner IS NOT NULL ORDER BY owner"
             ); ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     String owner = trim(rs.getString("owner"));
@@ -505,15 +506,127 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<ObjectInfo> listObjects(String schema) {
-        return listObjects(schema, MetadataListConstraints.NONE);
+        String resolved = schema == null ? "" : schema.trim();
+        List<ObjectInfo> result = new ArrayList<>();
+        for (TableInfo table : listTables(resolved)) {
+            result.add(new ObjectInfo(table.getName(), table.getTable_type(), resolved, table.getComment(), table.getValid()));
+        }
+        try {
+            appendRoutineObjects(result, resolved, "f", "FUNCTION");
+            appendRoutineObjects(result, resolved, "t", "PROCEDURE");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        return result;
     }
 
     @Override
     public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
         MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
-        String resolved = schema == null ? "" : schema.trim();
-        List<TableInfo> tables = listTables(resolved, normalized);
-        return normalized.filterObjects(StandardJdbcMetadata.INSTANCE.listObjects(tables, resolved));
+        if (isUnconstrained(normalized)) {
+            return listObjects(schema);
+        }
+        if (!includesSupportedObjects(normalized)) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedObjects(schema, normalized);
+        } catch (Exception e) {
+            return normalized.filterObjects(listObjects(schema));
+        }
+    }
+
+    private static boolean includesSupportedObjects(MetadataListConstraints constraints) {
+        return constraints.includesTableLikeTypes()
+            || constraints.objectTypeAllowed("PROCEDURE")
+            || constraints.objectTypeAllowed("FUNCTION");
+    }
+
+    private void appendRoutineObjects(List<ObjectInfo> result, String schema, String routineKind, String objectType)
+        throws Exception {
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("SELECT procname FROM sysprocedures WHERE isproc = ?");
+        args.add(routineKind);
+        String owner = trim(schema);
+        if (!owner.isEmpty()) {
+            sql.append(" AND owner = ?");
+            args.add(owner);
+        }
+        sql.append(" ORDER BY procname");
+        try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
+            bind(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new ObjectInfo(trim(rs.getString("procname")), objectType, emptyToNull(owner), null));
+                }
+            }
+        }
+    }
+
+    private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) throws Exception {
+        List<ObjectInfo> result = new ArrayList<>();
+        List<String> branches = new ArrayList<>();
+        List<Object> args = new ArrayList<>();
+        String owner = trim(schema);
+        if (constraints.includesTableLikeTypes()) {
+            StringBuilder tableSql = new StringBuilder("SELECT tabname AS object_name, CASE tabtype WHEN 'T' THEN 'TABLE' WHEN 'V' THEN 'VIEW' ELSE tabtype END AS object_type, 0 AS object_order FROM systables WHERE tabid >= 100");
+            appendGbase8sTableTypePredicate(tableSql, constraints);
+            if (!owner.isEmpty()) {
+                tableSql.append(" AND owner = ?");
+                args.add(owner);
+            }
+            if (constraints.hasFilter()) {
+                tableSql.append(" AND UPPER(tabname) LIKE ? ESCAPE '\\\\'");
+                args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+            }
+            branches.add(tableSql.toString());
+        }
+        if (constraints.objectTypeAllowed("FUNCTION")) {
+            StringBuilder functionSql = new StringBuilder("SELECT procname AS object_name, 'FUNCTION' AS object_type, 1 AS object_order FROM sysprocedures WHERE isproc = 'f'");
+            if (!owner.isEmpty()) {
+                functionSql.append(" AND owner = ?");
+                args.add(owner);
+            }
+            if (constraints.hasFilter()) {
+                functionSql.append(" AND UPPER(procname) LIKE ? ESCAPE '\\\\'");
+                args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+            }
+            branches.add(functionSql.toString());
+        }
+        if (constraints.objectTypeAllowed("PROCEDURE")) {
+            StringBuilder procedureSql = new StringBuilder("SELECT procname AS object_name, 'PROCEDURE' AS object_type, 2 AS object_order FROM sysprocedures WHERE isproc = 't'");
+            if (!owner.isEmpty()) {
+                procedureSql.append(" AND owner = ?");
+                args.add(owner);
+            }
+            if (constraints.hasFilter()) {
+                procedureSql.append(" AND UPPER(procname) LIKE ? ESCAPE '\\\\'");
+                args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+            }
+            branches.add(procedureSql.toString());
+        }
+        if (branches.isEmpty()) {
+            return List.of();
+        }
+        StringBuilder sql = new StringBuilder("SELECT ");
+        if (constraints.hasOffset()) {
+            sql.append("SKIP ").append(constraints.getOffset()).append(' ');
+        }
+        if (constraints.hasLimit()) {
+            sql.append("FIRST ").append(constraints.getLimit()).append(' ');
+        }
+        sql.append("object_name, object_type FROM (")
+            .append(String.join(" UNION ALL ", branches))
+            .append(") metadata_objects ORDER BY object_order, object_name");
+        try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
+            bind(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new ObjectInfo(trim(rs.getString("object_name")), trim(rs.getString("object_type")), emptyToNull(owner), null));
+                }
+            }
+        }
+        return constraints.withoutPaging().filterObjects(result);
     }
 
     @Override
@@ -871,10 +984,55 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         String normalizedType = objectType == null ? "" : objectType.trim().toUpperCase(Locale.ROOT);
-        if (!"VIEW".equals(normalizedType)) {
-            throw new UnsupportedOperationException("Object source is not supported");
+        if ("VIEW".equals(normalizedType)) {
+            return new ObjectSource(name, "VIEW", emptyToNull(trim(schema)), viewSource(schema, name), isEditableView(schema, name));
         }
-        return new ObjectSource(name, "VIEW", emptyToNull(trim(schema)), viewSource(schema, name), isEditableView(schema, name));
+        if ("PROCEDURE".equals(normalizedType) || "FUNCTION".equals(normalizedType)) {
+            return new ObjectSource(name, normalizedType, emptyToNull(trim(schema)), routineSource(schema, name), false);
+        }
+        throw new UnsupportedOperationException("Object source is not supported for " + objectType);
+    }
+
+    private String routineSource(String schema, String name) {
+        try {
+            String owner = trim(schema);
+            List<Object> args = new ArrayList<>();
+            args.add(name);
+            StringBuilder sql = new StringBuilder("""
+                SELECT b.data FROM sysprocbody b
+                JOIN sysprocedures p ON b.procid = p.procid
+                WHERE p.procname = ? AND b.datakey = 'T'
+                """.stripIndent().trim());
+            if (!owner.isEmpty()) {
+                sql.append(" AND p.owner = ?");
+                args.add(owner);
+            }
+            sql.append(" ORDER BY b.seqno");
+            StringBuilder sb = new StringBuilder();
+            try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
+                bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        String value = rs.getString(1);
+                        if (value != null) {
+                            int nullIndex = value.indexOf('\0');
+                            if (nullIndex >= 0) {
+                                sb.append(value, 0, nullIndex);
+                            } else {
+                                sb.append(value);
+                            }
+                        }
+                    }
+                }
+            }
+            String result = stripTrailing(sb.toString());
+            if (result.isEmpty()) {
+                throw new IllegalArgumentException("Routine source not found: " + name);
+            }
+            return result;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override

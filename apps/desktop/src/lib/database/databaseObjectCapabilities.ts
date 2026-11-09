@@ -75,7 +75,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["cloudflare-d1", TABLE_VIEW_OBJECTS],
   ["duckdb", TABLE_VIEW_OBJECTS],
   ["clickhouse", TABLE_VIEW_OBJECTS],
-  ["gbase8s", TABLE_VIEW_OBJECTS],
+  ["gbase8s", ROUTINE_OBJECTS],
   // Informix lists procedures/functions from sysprocedures natively, so keep
   // the routine-capable set here instead of the TABLE/VIEW-only one.
   ["informix", ROUTINE_OBJECTS],
